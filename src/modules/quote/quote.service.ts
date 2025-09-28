@@ -202,7 +202,7 @@ export class QuoteService {
       quoteEntity.inputAmount = quote.inAmount;
       quoteEntity.outputAmount = quote.outAmount;
       quoteEntity.priceImpactPct = quote.priceImpactPct;
-      quoteEntity.provider = quote.provider === 'Jupiter' ? QuoteProvider.JUPITER : QuoteProvider.OKX;
+      quoteEntity.provider = quote.provider.toLowerCase() === 'jupiter' ? QuoteProvider.JUPITER : QuoteProvider.OKX;
       quoteEntity.routePlan = quote.routePlan;
       quoteEntity.feeAmount = quote.platformFee?.amount || '0';
       quoteEntity.gasEstimate = '100000'; // Default estimate

@@ -232,6 +232,7 @@ export class RouteEngineService implements RouteEngine {
 
     // Wait for all provider quotes
     const results = await Promise.allSettled([jupiterPromise, okxPromise]);
+    // const results = await Promise.allSettled([jupiterPromise]);
     
     return results
       .filter((result): result is PromiseFulfilledResult<ProviderQuote> => 
