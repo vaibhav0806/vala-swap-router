@@ -1,0 +1,153 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "VALA Swap Router - Performance Monitoring",
+    "tags": ["vala", "performance", "api"],
+    "style": "dark",
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "API Response Times (P50, P95, P99) vs 350ms Target",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(vala_swap_request_duration_seconds_bucket[5m])) * 1000",
+            "legendFormat": "P50",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(vala_swap_request_duration_seconds_bucket[5m])) * 1000",
+            "legendFormat": "P95",
+            "refId": "B"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(vala_swap_request_duration_seconds_bucket[5m])) * 1000",
+            "legendFormat": "P99",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms",
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 250},
+                {"color": "red", "value": 350}
+              ]
+            },
+            "max": 500,
+            "min": 0
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Requests Per Second by Endpoint",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vala_swap_requests_total[1m])",
+            "legendFormat": "{{route}} ({{method}})",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Response Time Distribution by Endpoint",
+        "type": "heatmap",
+        "targets": [
+          {
+            "expr": "rate(vala_swap_request_duration_seconds_bucket[5m])",
+            "legendFormat": "{{route}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Cache Performance",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(vala_swap_cache_hits_total[5m]) / (rate(vala_swap_cache_hits_total[5m]) + rate(vala_swap_cache_misses_total[5m])) * 100",
+            "legendFormat": "Hit Ratio %",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(vala_swap_cache_hits_total[5m])",
+            "legendFormat": "Hits/sec",
+            "refId": "B"
+          },
+          {
+            "expr": "rate(vala_swap_cache_misses_total[5m])",
+            "legendFormat": "Misses/sec",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": null},
+                {"color": "yellow", "value": 70},
+                {"color": "green", "value": 85}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "id": 5,
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vala_swap_errors_total[5m])",
+            "legendFormat": "{{error_code}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "errors/sec"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "timepicker": {},
+    "templating": {
+      "list": []
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "350ms Target",
+          "datasource": "-- Grafana --",
+          "type": "dashboard",
+          "iconColor": "red",
+          "enable": true
+        }
+      ]
+    },
+    "refresh": "5s",
+    "schemaVersion": 16,
+    "version": 0
+  }
+}

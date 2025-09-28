@@ -15,6 +15,7 @@ import { OkxAdapter } from '../adapters/okx/okx.adapter';
 import { CacheService } from '../cache/cache.service';
 import { ErrorCode } from '../../common/enums/error-codes.enum';
 import { SwapException } from '../../common/exceptions/swap.exception';
+import { MetricsService } from '../metrics/metrics.service';
 
 @Injectable()
 export class RouteEngineService implements RouteEngine {
@@ -26,6 +27,7 @@ export class RouteEngineService implements RouteEngine {
     private jupiterAdapter: JupiterAdapter,
     private okxAdapter: OkxAdapter,
     private cacheService: CacheService,
+    private metricsService: MetricsService,
   ) {
     this.config = {
       performanceWeights: this.configService.get('dex.performanceWeights') || {
@@ -73,6 +75,7 @@ export class RouteEngineService implements RouteEngine {
       const quotes = await this.settleQuotePromises(quotePromises);
 
       if (quotes.length === 0) {
+        this.metricsService.trackError('ROUTE_NOT_FOUND', undefined, 'findBestRoute');
         throw new SwapException(ErrorCode.ROUTE_NOT_FOUND, {
           requestId,
           request,
@@ -80,10 +83,17 @@ export class RouteEngineService implements RouteEngine {
       }
 
       // Calculate scores for each quote
-      const scoredQuotes = quotes.map(quote => ({
-        ...quote,
-        score: this.calculateRouteScore(quote, quote.responseTime),
-      }));
+      const scoredQuotes = quotes.map(quote => {
+        const score = this.calculateRouteScore(quote, quote.responseTime);
+        
+        // Track route score metrics
+        this.metricsService.trackRouteScore(quote.provider, score.totalScore);
+        
+        return {
+          ...quote,
+          score,
+        };
+      });
 
       // Apply policy preferences
       const rankedQuotes = this.applyRoutingPolicy(scoredQuotes, request);
@@ -105,6 +115,14 @@ export class RouteEngineService implements RouteEngine {
         await this.cacheService.set(cacheKey, result, this.config.routeExpirationMs);
       }
 
+      // Track successful quote
+      this.metricsService.trackQuote(
+        request.inputMint,
+        request.outputMint,
+        bestRoute.provider,
+        'success'
+      );
+
       this.logger.debug('Best route found', {
         requestId,
         provider: bestRoute.provider,
@@ -115,6 +133,12 @@ export class RouteEngineService implements RouteEngine {
 
       return result;
     } catch (error) {
+      this.metricsService.trackError(
+        error.errorCode || 'UNKNOWN_ERROR',
+        undefined,
+        'findBestRoute'
+      );
+      
       this.logger.error('Failed to find best route', { requestId, error });
       throw error;
     }
@@ -186,6 +210,9 @@ export class RouteEngineService implements RouteEngine {
       const quote = await quoteFunction();
       const responseTime = Date.now() - startTime;
       
+      // Track successful provider quote
+      this.metricsService.trackProviderQuote(provider, 'success', responseTime);
+      
       return {
         ...quote,
         provider,
@@ -194,6 +221,16 @@ export class RouteEngineService implements RouteEngine {
         isCached: false,
       };
     } catch (error) {
+      const responseTime = Date.now() - startTime;
+      
+      // Track failed provider quote
+      this.metricsService.trackProviderQuote(provider, 'error', responseTime);
+      this.metricsService.trackError(
+        error.errorCode || 'PROVIDER_ERROR',
+        provider,
+        'getQuote'
+      );
+      
       this.logger.warn(`Failed to get quote from ${provider}:`, error.message);
       throw error;
     }

@@ -1,51 +1,40 @@
 #!/bin/bash
 
-API="http://localhost:3000/api/v1"
-SOL="So11111111111111111111111111111111111111112"
-USDC="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-USER="8WzZd5zKYQK6qZvJVqxFjfK8nkGLCwhfYHSfQ1GqQxcZ"
+BASE_URL="http://localhost:3000/api/v1"
+USER_PUBKEY="8WzZd5zKYQK6qZvJVqxFjfK8nkGLCwhfYHSfQ1GqQxcZ"
 
-echo "🔧 Testing OKX Fix"
+for i in $(seq 1 1000); do
+  echo "----- Request $i -----"
 
-# Get quote
-QUOTE=$(curl -s "$API/quote?inputMint=$SOL&outputMint=$USDC&amount=1000000000&slippageBps=50")
-QUOTE_ID=$(echo $QUOTE | jq -r '.quoteId')
-PROVIDER=$(echo $QUOTE | jq -r '.bestRoute.provider')
+  # Step 1: Get quote
+  QUOTE_RESPONSE=$(curl -s --location "$BASE_URL/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=So11111111111111111111111111111111111111112&amount=100000000&slippageBps=50" \
+    --header 'accept: application/json')
 
-echo "Quote ID: $QUOTE_ID"
-echo "Provider: $PROVIDER"
+  # Extract quoteId using jq
+  QUOTE_ID=$(echo "$QUOTE_RESPONSE" | jq -r '.quoteId')
 
-# Show full quote structure for debugging
-echo ""
-echo "Full quote response:"
-echo $QUOTE | jq '{
-  quoteId: .quoteId,
-  bestRoute: {
-    provider: .bestRoute.provider,
-    inputMint: .bestRoute.inputMint,
-    outputMint: .bestRoute.outputMint,
-    inAmount: .bestRoute.inAmount,
-    outAmount: .bestRoute.outAmount,
-    slippageBps: .bestRoute.slippageBps
-  }
-}'
+  if [[ -z "$QUOTE_ID" || "$QUOTE_ID" == "null" ]]; then
+    echo "❌ Failed to get quoteId on iteration $i"
+    sleep 1
+    continue
+  fi
 
-# Try swap execution
-echo ""
-echo "Attempting swap execution..."
-SWAP_RESULT=$(curl -s -X POST "$API/swap/execute" \
-  -H "Content-Type: application/json" \
-  -d "{\"quoteId\":\"$QUOTE_ID\",\"userPublicKey\":\"$USER\"}")
+  echo "Got quoteId: $QUOTE_ID"
 
-echo ""
-echo "Swap result:"
-echo $SWAP_RESULT | jq '.'
+  sleep 1
 
-# Check if it failed
-ERROR_CODE=$(echo $SWAP_RESULT | jq -r '.errorCode // "none"')
-if [ "$ERROR_CODE" != "none" ]; then
-    echo ""
-    echo "❌ Error detected: $ERROR_CODE"
-    echo "Details:"
-    echo $SWAP_RESULT | jq '.details // {}'
-fi
+  # Step 2: Execute swap
+  EXECUTE_RESPONSE=$(curl -s --location "$BASE_URL/swap/execute" \
+    --header 'accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data "{
+      \"quoteId\": \"$QUOTE_ID\",
+      \"userPublicKey\": \"$USER_PUBKEY\"
+    }")
+
+  echo "Execute response: $EXECUTE_RESPONSE"
+  echo ""
+
+  # Wait 1 second before next iteration
+  sleep 1
+done

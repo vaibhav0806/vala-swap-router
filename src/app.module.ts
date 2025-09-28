@@ -28,6 +28,7 @@ import { Quote } from './database/entities/quote.entity';
 import { JupiterAdapter } from './modules/adapters/jupiter/jupiter.adapter';
 import { OkxAdapter } from './modules/adapters/okx/okx.adapter';
 import { RouteEngineService } from './modules/route-engine/route-engine.service';
+import { MetricsModule } from './modules/metrics/metrics.module';
 
 @Module({
   imports: [
@@ -66,17 +67,18 @@ import { RouteEngineService } from './modules/route-engine/route-engine.service'
     // Health checks
     TerminusModule,
 
-    // Metrics
-    PrometheusModule.register({
-      defaultMetrics: {
-        enabled: true,
-        config: {
-          prefix: 'vala_swap_',
-        },
-      },
-    }),
+    // Metrics - Remove this duplicate registration
+    // PrometheusModule.register({
+    //   defaultMetrics: {
+    //     enabled: true,
+    //     config: {
+    //       prefix: 'vala_swap_',
+    //     },
+    //   },
+    // }),
 
     // Application modules
+    MetricsModule, // This already includes Prometheus setup
     CacheModule,
     HealthModule,
     TokensModule,

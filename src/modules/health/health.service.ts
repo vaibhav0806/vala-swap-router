@@ -3,6 +3,7 @@ import { TypeOrmHealthIndicator, HealthCheckService } from '@nestjs/terminus';
 import { JupiterAdapter } from '../adapters/jupiter/jupiter.adapter';
 import { OkxAdapter } from '../adapters/okx/okx.adapter';
 import { CacheService } from '../cache/cache.service';
+import { MetricsService } from '../metrics/metrics.service';
 
 export interface HealthStatus {
   status: 'ok' | 'error';
@@ -39,6 +40,7 @@ export class HealthService {
     private jupiterAdapter: JupiterAdapter,
     private okxAdapter: OkxAdapter,
     private cacheService: CacheService,
+    private metricsService: MetricsService, // Add metrics service
   ) {}
 
   async getHealthStatus(): Promise<HealthStatus> {
@@ -60,6 +62,10 @@ export class HealthService {
         jupiter: this.getServiceResult(jupiter),
         okx: this.getServiceResult(okx),
       };
+
+      // Update provider availability metrics
+      this.metricsService.updateProviderAvailability('jupiter', services.jupiter.status === 'healthy');
+      this.metricsService.updateProviderAvailability('okx', services.okx.status === 'healthy');
 
       // Determine overall status
       const allHealthy = Object.values(services).every(service => service.status === 'healthy');

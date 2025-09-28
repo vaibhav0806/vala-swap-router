@@ -13,6 +13,9 @@ import compression from 'compression';
 import morgan from 'morgan';
 import { AppModule } from './app.module';
 import { SwapExceptionFilter } from './common/filters/swap-exception.filter';
+import { MetricsInterceptor } from './common/interceptors/metrics.interceptor';
+import { CorrelationIdInterceptor } from './common/interceptors/correlation-id.interceptor';
+import { MetricsService } from './modules/metrics/metrics.service';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -56,14 +59,23 @@ async function bootstrap() {
   // Global exception filter
   app.useGlobalFilters(new SwapExceptionFilter());
 
+  // Global interceptors for observability
+  app.useGlobalInterceptors(new CorrelationIdInterceptor());
+  
+  // Get MetricsService and create MetricsInterceptor instance
+  const metricsService = app.get(MetricsService);
+  app.useGlobalInterceptors(new MetricsInterceptor(metricsService));
+
   // API versioning
   app.enableVersioning({
     type: VersioningType.URI,
     defaultVersion: '1',
   });
 
-  // Global prefix
-  app.setGlobalPrefix('api');
+  // Global prefix - BUT exclude /metrics from the prefix
+  app.setGlobalPrefix('api', {
+    exclude: ['metrics', 'health'], // Exclude metrics and health from api prefix
+  });
 
   // Swagger documentation
   if (process.env.NODE_ENV !== 'production') {
@@ -92,6 +104,7 @@ async function bootstrap() {
   console.log(`🚀 VALA Swap Router is running on: http://localhost:${port}`);
   console.log(`📚 API Documentation: http://localhost:${port}/api/docs`);
   console.log(`🔍 Health Check: http://localhost:${port}/api/v1/healthz`);
+  console.log(`📊 Metrics: http://localhost:${port}/api/v1/metrics/prometheus`);
 }
 
 bootstrap().catch((error) => {

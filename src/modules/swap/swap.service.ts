@@ -20,6 +20,7 @@ import {
 } from '../../common/interfaces/dex-adapter.interface';
 import { ErrorCode } from '../../common/enums/error-codes.enum';
 import { SwapException } from '../../common/exceptions/swap.exception';
+import { MetricsService } from '../metrics/metrics.service';
 
 @Injectable()
 export class SwapService {
@@ -34,6 +35,7 @@ export class SwapService {
     private okxAdapter: OkxAdapter,
     private quoteService: QuoteService,
     private cacheService: CacheService,
+    private metricsService: MetricsService, // Add metrics service
   ) {}
 
   async executeSwap(request: ExecuteSwapDto): Promise<SwapExecutionResponseDto> {
@@ -58,6 +60,14 @@ export class SwapService {
 
       // Create swap transaction record
       const swapTransaction = await this.createSwapTransaction(quote, request);
+
+      // Track swap initiation
+      this.metricsService.trackSwap(
+        quote.provider === QuoteProvider.JUPITER ? 'jupiter' : 'okx',
+        'initiated',
+        quote.inputToken,
+        quote.outputToken
+      );
 
       // Get the appropriate adapter
       const adapter = this.getAdapterForProvider(quote.provider);
@@ -109,6 +119,14 @@ export class SwapService {
         processingTime,
         expiresAt: swapTransaction.expiresAt,
       };
+
+      // Track successful swap preparation
+      this.metricsService.trackSwap(
+        quote.provider === QuoteProvider.JUPITER ? 'jupiter' : 'okx',
+        'prepared',
+        quote.inputToken,
+        quote.outputToken
+      );
 
       this.logger.debug('Swap execution prepared', {
         transactionId: swapTransaction.id,
@@ -306,6 +324,17 @@ export class SwapService {
       }
 
       await this.swapRepository.update({ id: transactionId }, updateData);
+
+      // Track status change metrics
+      const swap = await this.swapRepository.findOne({ where: { id: transactionId } });
+      if (swap) {
+        this.metricsService.trackSwap(
+          swap.provider,
+          status,
+          swap.inputToken,
+          swap.outputToken
+        );
+      }
 
       this.logger.debug(`Updated swap status: ${transactionId} -> ${status}`);
     } catch (error) {

@@ -15,6 +15,7 @@ import {
 } from '../../../common/interfaces/dex-adapter.interface';
 import { ErrorCode } from '../../../common/enums/error-codes.enum';
 import { SwapException } from '../../../common/exceptions/swap.exception';
+import { MetricsService } from '../../metrics/metrics.service'; // Add metrics import
 
 @Injectable()
 export class OkxAdapter implements DexAdapter {
@@ -27,7 +28,10 @@ export class OkxAdapter implements DexAdapter {
   private readonly timeout: number;
   private readonly retries: number;
 
-  constructor(private configService: ConfigService) {
+  constructor(
+    private configService: ConfigService,
+    private metricsService: MetricsService, // Add metrics service injection
+  ) {
     const config = this.configService.get('dex.okx');
     this.apiUrl = config.apiUrl;
     this.accessKey = config.accessKey;
@@ -63,15 +67,6 @@ export class OkxAdapter implements DexAdapter {
         config.headers['OK-ACCESS-SIGN'] = signature;
         config.headers['OK-ACCESS-TIMESTAMP'] = timestamp;
         config.headers['OK-ACCESS-PASSPHRASE'] = this.passphrase;
-
-        console.log("Timestamp: ", timestamp);
-        console.log("Method: ", method);
-        console.log("Request Path: ", requestPath);
-        console.log("Params: ", config.params);
-        console.log("Data: ", config.data);
-        console.log("Signature: ", signature);
-        console.log("Access Key: ", this.accessKey);
-        console.log("Passphrase: ", this.passphrase);
 
         this.logger.debug(`OKX API Request: ${method} ${requestPath}`);
         this.logger.debug('OKX Signature Debug:', {
@@ -133,6 +128,9 @@ export class OkxAdapter implements DexAdapter {
       const quoteData = data.data[0];
       const timeTaken = Date.now() - startTime;
 
+      // Track successful quote metrics
+      this.metricsService.trackProviderQuote('okx', 'success', timeTaken);
+
       // Transform OKX response to our standard format
       const route: RouteStep[] = quoteData.routerResult?.map((step: any) => ({
         swapInfo: {
@@ -177,6 +175,14 @@ export class OkxAdapter implements DexAdapter {
     } catch (error) {
       const timeTaken = Date.now() - startTime;
 
+      // Track failed quote metrics
+      this.metricsService.trackProviderQuote('okx', 'error', timeTaken);
+      this.metricsService.trackError(
+        error.errorCode || 'PROVIDER_ERROR',
+        'okx',
+        'getQuote'
+      );
+
       if (error instanceof SwapException) {
         throw error;
       }
@@ -212,13 +218,12 @@ export class OkxAdapter implements DexAdapter {
         userPublicKey: request.userPublicKey,
       });
 
-      // TO THIS:
       const params = {
         chainIndex: '501',
         fromTokenAddress: request.quoteResponse.inputMint,
         toTokenAddress: request.quoteResponse.outputMint,
         amount: request.quoteResponse.inAmount,
-        slippagePercent: ((request.quoteResponse.slippageBps || 50) / 10000).toString(), // ← FIXED parameter name
+        slippagePercent: ((request.quoteResponse.slippageBps || 50) / 10000).toString(),
         userWalletAddress: request.userPublicKey,
         sort: '1',
       };
@@ -242,11 +247,23 @@ export class OkxAdapter implements DexAdapter {
       };
 
       const timeTaken = Date.now() - startTime;
+      
+      // Track successful transaction build
+      this.metricsService.trackProviderQuote('okx', 'success', timeTaken);
+      
       this.logger.debug('OKX transaction built', { timeTaken });
 
       return result;
     } catch (error) {
       const timeTaken = Date.now() - startTime;
+
+      // Track failed transaction build
+      this.metricsService.trackProviderQuote('okx', 'error', timeTaken);
+      this.metricsService.trackError(
+        error.errorCode || 'PROVIDER_ERROR',
+        'okx',
+        'buildTransaction'
+      );
 
       if (error instanceof SwapException) {
         throw error;
@@ -283,11 +300,23 @@ export class OkxAdapter implements DexAdapter {
       };
 
       const timeTaken = Date.now() - startTime;
+      
+      // Track successful simulation
+      this.metricsService.trackProviderQuote('okx', 'success', timeTaken);
+      
       this.logger.debug('OKX simulation completed', { timeTaken });
 
       return result;
     } catch (error) {
       const timeTaken = Date.now() - startTime;
+
+      // Track failed simulation
+      this.metricsService.trackProviderQuote('okx', 'error', timeTaken);
+      this.metricsService.trackError(
+        error.errorCode || 'PROVIDER_ERROR',
+        'okx',
+        'simulateTransaction'
+      );
 
       this.logger.error('OKX simulateTransaction error:', error);
       throw new SwapException(ErrorCode.DEX_UNAVAILABLE, {
@@ -303,11 +332,30 @@ export class OkxAdapter implements DexAdapter {
   }
 
   async isHealthy(): Promise<boolean> {
+    const startTime = Date.now();
+    
     try {
       // Simple health check by making a minimal request to supported chains
       const response = await this.httpClient.get('/supported/chain', { timeout: 3000 });
-      return response.status === 200 && response.data?.code === '0';
+      const isHealthy = response.status === 200 && response.data?.code === '0';
+      
+      const timeTaken = Date.now() - startTime;
+      
+      // Update availability metric
+      this.metricsService.updateProviderAvailability('okx', isHealthy);
+      
+      // Track health check performance
+      this.metricsService.trackProviderQuote('okx', isHealthy ? 'success' : 'error', timeTaken);
+      
+      return isHealthy;
     } catch (error) {
+      const timeTaken = Date.now() - startTime;
+      
+      // Track failed health check
+      this.metricsService.updateProviderAvailability('okx', false);
+      this.metricsService.trackProviderQuote('okx', 'error', timeTaken);
+      this.metricsService.trackError('PROVIDER_HEALTH_CHECK_FAILED', 'okx', 'isHealthy');
+      
       this.logger.warn('OKX health check failed:', error.message);
       return false;
     }

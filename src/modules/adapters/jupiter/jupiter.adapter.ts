@@ -12,6 +12,7 @@ import {
 } from '../../../common/interfaces/dex-adapter.interface';
 import { ErrorCode } from '../../../common/enums/error-codes.enum';
 import { SwapException } from '../../../common/exceptions/swap.exception';
+import { MetricsService } from '../../../modules/metrics/metrics.service';
 
 @Injectable()
 export class JupiterAdapter implements DexAdapter {
@@ -21,7 +22,10 @@ export class JupiterAdapter implements DexAdapter {
   private readonly timeout: number;
   private readonly retries: number;
 
-  constructor(private configService: ConfigService) {
+  constructor(
+    private configService: ConfigService,
+    private metricsService: MetricsService,
+  ) {
     const config = this.configService.get('dex.jupiter');
     this.apiUrl = config.apiUrl;
     this.timeout = config.timeout;
@@ -110,6 +114,9 @@ export class JupiterAdapter implements DexAdapter {
         outAmount: quote.outAmount,
         timeTaken,
       });
+
+      // Track successful quote
+      this.metricsService.trackProviderQuote('jupiter', 'success', timeTaken);
 
       return quote;
     } catch (error) {
@@ -259,8 +266,14 @@ export class JupiterAdapter implements DexAdapter {
     try {
       // Simple health check by making a minimal request
       const response = await this.httpClient.get('/tokens', { timeout: 3000 });
-      return response.status === 200;
+      const isHealthy = response.status === 200;
+      
+      // Update availability metric
+      this.metricsService.updateProviderAvailability('jupiter', isHealthy);
+      
+      return isHealthy;
     } catch (error) {
+      this.metricsService.updateProviderAvailability('jupiter', false);
       this.logger.warn('Jupiter health check failed:', error.message);
       return false;
     }

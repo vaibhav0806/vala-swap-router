@@ -4,6 +4,7 @@ import type { Cache } from 'cache-manager';
 import { ConfigService } from '@nestjs/config';
 import { ErrorCode } from '../../common/enums/error-codes.enum';
 import { SwapException } from '../../common/exceptions/swap.exception';
+import { MetricsService } from '../metrics/metrics.service';
 
 @Injectable()
 export class CacheService {
@@ -13,30 +14,53 @@ export class CacheService {
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
     private configService: ConfigService,
+    private metricsService: MetricsService, // Add metrics service
   ) {
     this.defaultTtl = this.configService.get('redis.ttl', 30000);
   }
 
   async get<T>(key: string): Promise<T | null> {
+    const startTime = Date.now();
+    const cacheType = this.extractCacheType(key);
+    
     try {
       const value = await this.cacheManager.get<T>(key);
+      const duration = Date.now() - startTime;
+      
       if (value) {
         this.logger.debug(`Cache hit for key: ${key}`);
+        this.metricsService.trackCacheHit(cacheType, 'get');
       } else {
         this.logger.debug(`Cache miss for key: ${key}`);
+        this.metricsService.trackCacheMiss(cacheType, 'get');
       }
+      
+      this.metricsService.trackCacheOperation('get', 'success', duration);
       return value || null;
     } catch (error) {
+      const duration = Date.now() - startTime;
+      this.metricsService.trackCacheOperation('get', 'error', duration);
+      this.metricsService.trackCacheMiss(cacheType, 'get');
+      
       this.logger.error(`Cache get error for key ${key}:`, error);
       throw new SwapException(ErrorCode.CACHE_ERROR, { key, error: error.message });
     }
   }
 
   async set<T>(key: string, value: T, ttl?: number): Promise<void> {
+    const startTime = Date.now();
+    const cacheType = this.extractCacheType(key);
+    
     try {
       await this.cacheManager.set(key, value, ttl || this.defaultTtl);
+      const duration = Date.now() - startTime;
+      
+      this.metricsService.trackCacheOperation('set', 'success', duration);
       this.logger.debug(`Cache set for key: ${key}, TTL: ${ttl || this.defaultTtl}ms`);
     } catch (error) {
+      const duration = Date.now() - startTime;
+      this.metricsService.trackCacheOperation('set', 'error', duration);
+      
       this.logger.error(`Cache set error for key ${key}:`, error);
       throw new SwapException(ErrorCode.CACHE_ERROR, { key, error: error.message });
     }
@@ -164,5 +188,10 @@ export class CacheService {
       }
       await new Promise(resolve => setTimeout(resolve, checkInterval));
     }
+  }
+
+  private extractCacheType(key: string): string {
+    const prefix = key.split(':')[0];
+    return prefix || 'unknown';
   }
 }
