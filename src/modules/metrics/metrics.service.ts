@@ -31,7 +31,19 @@ export class MetricsService {
   private circuitBreakerStateChanges: Counter<string>;
   private circuitBreakerOperations: Counter<string>;
 
+  // Add coalescing-specific metrics
+  private readonly coalescingMetrics: {
+    originalRequests: Counter<string>;
+    duplicateRequests: Counter<string>;
+    requestsSaved: Counter<string>;
+    requestCount: Histogram<string>;
+    duration: Histogram<string>;
+  };
+
   constructor() {
+    // Clear existing metrics to prevent duplicates
+    register.clear();
+    
     // Initialize request metrics
     this.requestDuration = new Histogram({
       name: 'vala_swap_request_duration_seconds',
@@ -137,6 +149,41 @@ export class MetricsService {
       labelNames: ['service', 'result'],
     });
 
+    // Initialize coalescing metrics
+    this.coalescingMetrics = {
+      originalRequests: new Counter({
+        name: 'vala_swap_coalescing_original_requests_total',
+        help: 'Total number of original (non-coalesced) requests',
+        labelNames: ['cache_type'],
+      }),
+      
+      duplicateRequests: new Counter({
+        name: 'vala_swap_coalescing_duplicate_requests_total',
+        help: 'Total number of duplicate requests that were coalesced',
+        labelNames: ['cache_type'],
+      }),
+      
+      requestsSaved: new Counter({
+        name: 'vala_swap_coalescing_requests_saved_total',
+        help: 'Total number of requests saved through coalescing',
+        labelNames: ['cache_type'],
+      }),
+      
+      requestCount: new Histogram({
+        name: 'vala_swap_coalescing_request_count',
+        help: 'Number of requests coalesced together',
+        labelNames: ['cache_type'],
+        buckets: [1, 2, 3, 5, 10, 20, 50],
+      }),
+      
+      duration: new Histogram({
+        name: 'vala_swap_coalescing_duration_seconds',
+        help: 'Duration of coalesced request processing',
+        labelNames: ['cache_type'],
+        buckets: [0.1, 0.5, 1, 2, 5, 10],
+      }),
+    };
+
     // Register all metrics
     register.registerMetric(this.requestDuration);
     register.registerMetric(this.requestTotal);
@@ -154,6 +201,11 @@ export class MetricsService {
     register.registerMetric(this.circuitBreakerStateGauge);
     register.registerMetric(this.circuitBreakerStateChanges);
     register.registerMetric(this.circuitBreakerOperations);
+    register.registerMetric(this.coalescingMetrics.originalRequests);
+    register.registerMetric(this.coalescingMetrics.duplicateRequests);
+    register.registerMetric(this.coalescingMetrics.requestsSaved);
+    register.registerMetric(this.coalescingMetrics.requestCount);
+    register.registerMetric(this.coalescingMetrics.duration);
 
     this.logger.log('Prometheus metrics initialized');
   }
@@ -254,6 +306,39 @@ export class MetricsService {
    */
   trackCircuitBreakerOperation(serviceName: string, result: 'success' | 'failure'): void {
     this.circuitBreakerOperations.inc({ service: serviceName, result });
+  }
+
+  // Coalescing-specific tracking methods
+  incrementCounter(metricName: string, labels: Record<string, string>, value: number = 1): void {
+    const metric = this.coalescingMetrics[metricName.split('_').pop() as keyof typeof this.coalescingMetrics];
+    if (metric && 'inc' in metric) {
+      (metric as Counter<string>).inc(labels, value);
+    }
+  }
+
+  trackHistogram(metricName: string, value: number, labels: Record<string, string>): void {
+    const metricKey = metricName.split('_').pop() as keyof typeof this.coalescingMetrics;
+    const metric = this.coalescingMetrics[metricKey];
+    if (metric && 'observe' in metric) {
+      (metric as Histogram<string>).observe(labels, value);
+    }
+  }
+
+  // Get coalescing effectiveness metrics
+  getCoalescingEffectiveness(): {
+    totalOriginalRequests: number;
+    totalDuplicateRequests: number;
+    totalRequestsSaved: number;
+    coalescingRatio: number;
+  } {
+    // This would need to be implemented based on your metrics collection approach
+    // For now, return mock data - in production, you'd query the actual metrics
+    return {
+      totalOriginalRequests: 0,
+      totalDuplicateRequests: 0,
+      totalRequestsSaved: 0,
+      coalescingRatio: 0,
+    };
   }
 
   // Utility method to calculate cache hit ratio

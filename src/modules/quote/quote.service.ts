@@ -35,50 +35,34 @@ export class QuoteService {
       // Validate amount
       this.validateAmount(request.amount);
 
-      // Build route request
-      const routeRequest: RouteRequest = {
-        inputMint: request.inputMint,
-        outputMint: request.outputMint,
-        amount: request.amount,
-        slippageBps: request.slippageBps,
-        userPublicKey: request.userPublicKey,
-        favorLowLatency: request.favorLowLatency,
-        maxRoutes: request.maxRoutes,
-      };
-
-      // Find best routes
-      const routeResponse = await this.routeEngineService.findBestRoute(routeRequest);
-
-      // Transform to DTO format
-      const bestRoute = this.transformToProviderQuoteDto(routeResponse.bestRoute);
-      const alternatives = routeResponse.alternatives.map(alt => 
-        this.transformToProviderQuoteDto(alt)
+      // Generate cache key for the complete quote request
+      const quoteCacheKey = this.cacheService.generateQuoteKey(
+        request.inputMint,
+        request.outputMint,
+        request.amount,
+        request.slippageBps || 50
       );
 
-      // Calculate fee breakdown
-      const feeBreakdown = this.calculateFeeBreakdown(routeResponse.bestRoute);
+      // Use request coalescing for the entire quote operation
+      const result = await this.cacheService.getWithCoalescing(
+        quoteCacheKey,
+        () => this.executeQuoteRequest(request),
+        30000, // Cache quotes for 30 seconds
+        10000  // 10 second timeout for quote requests
+      );
 
-      // Store quote in database for analytics and get the quote ID
-      const quoteId = await this.storeQuote(routeResponse.bestRoute, routeResponse.requestId);
-
-      const response: QuoteResponseDto = {
-        bestRoute,
-        alternatives,
-        requestId: routeResponse.requestId,
-        quoteId, // Add the database quote ID for swap execution
-        totalResponseTime: Date.now() - startTime,
-        cacheHitRatio: routeResponse.cacheHitRatio,
-        feeBreakdown,
-      };
+      // Update timing information
+      result.totalResponseTime = Date.now() - startTime;
 
       this.logger.debug('Quote completed', {
-        requestId: routeResponse.requestId,
-        provider: bestRoute.provider,
-        outputAmount: bestRoute.outAmount,
-        totalTime: response.totalResponseTime,
+        requestId: result.requestId,
+        provider: result.bestRoute.provider,
+        outputAmount: result.bestRoute.outAmount,
+        totalTime: result.totalResponseTime,
+        coalesced: result.totalResponseTime < 100 // Likely coalesced if very fast
       });
 
-      return response;
+      return result;
     } catch (error) {
       this.logger.error('Failed to get quote:', error);
       
@@ -238,5 +222,47 @@ export class QuoteService {
       // Return a temporary ID if storage fails
       return `temp_${requestId}`;
     }
+  }
+
+  private async executeQuoteRequest(request: GetQuoteDto): Promise<QuoteResponseDto> {
+    const startTime = Date.now();
+    
+    this.logger.debug('Executing quote request (not coalesced)', { request });
+
+    // Build route request
+    const routeRequest: RouteRequest = {
+      inputMint: request.inputMint,
+      outputMint: request.outputMint,
+      amount: request.amount,
+      slippageBps: request.slippageBps,
+      userPublicKey: request.userPublicKey,
+      favorLowLatency: request.favorLowLatency,
+      maxRoutes: request.maxRoutes,
+    };
+
+    // Find best routes (this will use its own coalescing)
+    const routeResponse = await this.routeEngineService.findBestRoute(routeRequest);
+
+    // Transform to DTO format
+    const bestRoute = this.transformToProviderQuoteDto(routeResponse.bestRoute);
+    const alternatives = routeResponse.alternatives.map(alt => 
+      this.transformToProviderQuoteDto(alt)
+    );
+
+    // Calculate fee breakdown
+    const feeBreakdown = this.calculateFeeBreakdown(routeResponse.bestRoute);
+
+    // Store quote in database for analytics and get the quote ID
+    const quoteId = await this.storeQuote(routeResponse.bestRoute, routeResponse.requestId);
+
+    return {
+      bestRoute,
+      alternatives,
+      requestId: routeResponse.requestId,
+      quoteId,
+      totalResponseTime: Date.now() - startTime,
+      cacheHitRatio: routeResponse.cacheHitRatio,
+      feeBreakdown,
+    };
   }
 }

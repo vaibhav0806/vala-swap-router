@@ -68,88 +68,28 @@ export class RouteEngineService implements RouteEngine {
     this.logger.debug('Finding best route', { requestId, request });
 
     try {
-      // Check cache first
+      // Generate cache key for request coalescing
       const cacheKey = this.cacheService.generateRouteKey(
         request.inputMint,
         request.outputMint,
         request.amount,
       );
 
-      let cachedResult: BestRouteResponse | null = null;
-      if (this.config.enableCaching) {
-        cachedResult = await this.cacheService.get<BestRouteResponse>(cacheKey);
-        if (cachedResult && this.isRouteValid(cachedResult.bestRoute)) {
-          this.logger.debug('Returning cached route', { requestId });
-          return {
-            ...cachedResult,
-            requestId,
-            cacheHitRatio: 1.0,
-          };
-        }
-      }
-
-      // Fetch quotes from all providers in parallel
-      const quotePromises = await this.fetchQuotesFromProviders(request);
-      const quotes = await this.settleQuotePromises(quotePromises);
-
-      if (quotes.length === 0) {
-        this.metricsService.trackError('ROUTE_NOT_FOUND', undefined, 'findBestRoute');
-        throw new SwapException(ErrorCode.ROUTE_NOT_FOUND, {
-          requestId,
-          request,
-        });
-      }
-
-      // Calculate scores for each quote
-      const scoredQuotes = quotes.map(quote => {
-        const score = this.calculateRouteScore(quote, quote.responseTime);
-        
-        // Track route score metrics
-        this.metricsService.trackRouteScore(quote.provider, score.totalScore);
-        
-        return {
-          ...quote,
-          score,
-        };
-      });
-
-      // Apply policy preferences
-      const rankedQuotes = this.applyRoutingPolicy(scoredQuotes, request);
-
-      // Select best route and alternatives
-      const bestRoute = rankedQuotes[0];
-      const alternatives = rankedQuotes.slice(1, this.config.maxAlternatives + 1);
-
-      const result: BestRouteResponse = {
-        bestRoute,
-        alternatives,
-        requestId,
-        totalResponseTime: Date.now() - startTime,
-        cacheHitRatio: cachedResult ? 0.5 : 0.0,
-      };
-
-      // Cache the result
-      if (this.config.enableCaching) {
-        await this.cacheService.set(cacheKey, result, this.config.routeExpirationMs);
-      }
-
-      // Track successful quote
-      this.metricsService.trackQuote(
-        request.inputMint,
-        request.outputMint,
-        bestRoute.provider,
-        'success'
+      // Use request coalescing to prevent duplicate requests
+      const result = await this.cacheService.getWithCoalescing(
+        cacheKey,
+        () => this.executeRouteCalculation(request, requestId),
+        this.config.routeExpirationMs,
+        8000 // 8 second timeout for route calculation
       );
 
-      this.logger.debug('Best route found', {
+      // Update the result with current request ID and timing
+      return {
+        ...result,
         requestId,
-        provider: bestRoute.provider,
-        outputAmount: bestRoute.outAmount,
-        score: bestRoute.score.totalScore,
-        totalTime: result.totalResponseTime,
-      });
+        totalResponseTime: Date.now() - startTime,
+      };
 
-      return result;
     } catch (error) {
       this.metricsService.trackError(
         error.errorCode || 'UNKNOWN_ERROR',
@@ -194,7 +134,90 @@ export class RouteEngineService implements RouteEngine {
     return this.config;
   }
 
-  private async fetchQuotesFromProviders(request: RouteRequest): Promise<Promise<ProviderQuote>[]> {
+  private async executeRouteCalculation(request: RouteRequest, requestId: string): Promise<BestRouteResponse> {
+    const startTime = Date.now();
+    
+    this.logger.debug('Executing route calculation (not coalesced)', { requestId, request });
+
+    // Check cache first (for the actual execution)
+    const cacheKey = this.cacheService.generateRouteKey(
+      request.inputMint,
+      request.outputMint,
+      request.amount,
+    );
+
+    let cachedResult: BestRouteResponse | null = null;
+    if (this.config.enableCaching) {
+      cachedResult = await this.cacheService.get<BestRouteResponse>(cacheKey);
+      if (cachedResult && this.isRouteValid(cachedResult.bestRoute)) {
+        this.logger.debug('Returning cached route from execution', { requestId });
+        return {
+          ...cachedResult,
+          requestId,
+          cacheHitRatio: 1.0,
+        };
+      }
+    }
+
+    // Fetch quotes from all providers in parallel with coalescing
+    const quotes = await this.fetchQuotesWithCoalescing(request);
+
+    if (quotes.length === 0) {
+      this.metricsService.trackError('ROUTE_NOT_FOUND', undefined, 'findBestRoute');
+      throw new SwapException(ErrorCode.ROUTE_NOT_FOUND, {
+        requestId,
+        request,
+      });
+    }
+
+    // Calculate scores for each quote
+    const scoredQuotes = quotes.map(quote => {
+      const score = this.calculateRouteScore(quote, quote.responseTime);
+      
+      // Track route score metrics
+      this.metricsService.trackRouteScore(quote.provider, score.totalScore);
+      
+      return {
+        ...quote,
+        score,
+      };
+    });
+
+    // Apply policy preferences
+    const rankedQuotes = this.applyRoutingPolicy(scoredQuotes, request);
+
+    // Select best route and alternatives
+    const bestRoute = rankedQuotes[0];
+    const alternatives = rankedQuotes.slice(1, this.config.maxAlternatives + 1);
+
+    const result: BestRouteResponse = {
+      bestRoute,
+      alternatives,
+      requestId,
+      totalResponseTime: Date.now() - startTime,
+      cacheHitRatio: cachedResult ? 0.5 : 0.0,
+    };
+
+    // Track successful quote
+    this.metricsService.trackQuote(
+      request.inputMint,
+      request.outputMint,
+      bestRoute.provider,
+      'success'
+    );
+
+    this.logger.debug('Route calculation completed', {
+      requestId,
+      provider: bestRoute.provider,
+      outputAmount: bestRoute.outAmount,
+      score: bestRoute.score.totalScore,
+      totalTime: result.totalResponseTime,
+    });
+
+    return result;
+  }
+
+  private async fetchQuotesWithCoalescing(request: RouteRequest): Promise<ProviderQuote[]> {
     const quoteRequest = {
       inputMint: request.inputMint,
       outputMint: request.outputMint,
@@ -203,32 +226,49 @@ export class RouteEngineService implements RouteEngine {
       userPublicKey: request.userPublicKey,
     };
 
-    const promises: Promise<ProviderQuote>[] = [];
+    // Create coalesced quote requests for each provider
+    const jupiterPromise = this.fetchProviderQuoteWithCoalescing('jupiter', quoteRequest);
+    const okxPromise = this.fetchProviderQuoteWithCoalescing('okx', quoteRequest);
 
-    // Use circuit breaker wrapped adapters
-    promises.push(
-      this.fetchQuoteWithTiming('jupiter', () => 
-        this.jupiterCircuitBreaker.getQuote(quoteRequest)
+    // Wait for all provider quotes
+    const results = await Promise.allSettled([jupiterPromise, okxPromise]);
+    
+    return results
+      .filter((result): result is PromiseFulfilledResult<ProviderQuote> => 
+        result.status === 'fulfilled'
       )
-    );
-
-    promises.push(
-      this.fetchQuoteWithTiming('okx', () => 
-        this.okxCircuitBreaker.getQuote(quoteRequest)
-      )
-    );
-
-    return promises;
+      .map(result => result.value);
   }
 
-  private async fetchQuoteWithTiming(
-    provider: string,
-    quoteFunction: () => Promise<QuoteResponse>
+  private async fetchProviderQuoteWithCoalescing(
+    provider: string, 
+    quoteRequest: any
   ): Promise<ProviderQuote> {
+    // Generate a cache key specific to this provider and request
+    const providerCacheKey = `provider_quote:${provider}:${quoteRequest.inputMint}:${quoteRequest.outputMint}:${quoteRequest.amount}:${quoteRequest.slippageBps || 50}`;
+    
+    return this.cacheService.getWithCoalescing(
+      providerCacheKey,
+      () => this.executeProviderQuote(provider, quoteRequest),
+      15000, // Cache provider quotes for 15 seconds
+      5000   // 5 second timeout for provider quotes
+    );
+  }
+
+  private async executeProviderQuote(provider: string, quoteRequest: any): Promise<ProviderQuote> {
     const startTime = Date.now();
     
     try {
-      const quote = await quoteFunction();
+      let quote: QuoteResponse;
+      
+      if (provider === 'jupiter') {
+        quote = await this.jupiterCircuitBreaker.getQuote(quoteRequest);
+      } else if (provider === 'okx') {
+        quote = await this.okxCircuitBreaker.getQuote(quoteRequest);
+      } else {
+        throw new Error(`Unknown provider: ${provider}`);
+      }
+      
       const responseTime = Date.now() - startTime;
       
       // Track successful provider quote
@@ -262,16 +302,6 @@ export class RouteEngineService implements RouteEngine {
       
       throw error;
     }
-  }
-
-  private async settleQuotePromises(promises: Promise<ProviderQuote>[]): Promise<ProviderQuote[]> {
-    const results = await Promise.allSettled(promises);
-    
-    return results
-      .filter((result): result is PromiseFulfilledResult<ProviderQuote> => 
-        result.status === 'fulfilled'
-      )
-      .map(result => result.value);
   }
 
   private applyRoutingPolicy(quotes: ProviderQuote[], request: RouteRequest): ProviderQuote[] {

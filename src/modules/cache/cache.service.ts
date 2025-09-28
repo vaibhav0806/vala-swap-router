@@ -5,18 +5,27 @@ import { ConfigService } from '@nestjs/config';
 import { ErrorCode } from '../../common/enums/error-codes.enum';
 import { SwapException } from '../../common/exceptions/swap.exception';
 import { MetricsService } from '../metrics/metrics.service';
+import { register } from 'prom-client';
+import { Histogram } from 'prom-client';
 
 @Injectable()
 export class CacheService {
   private readonly logger = new Logger(CacheService.name);
   private readonly defaultTtl: number;
+  
+  // Request coalescing: Map of pending promises keyed by request signature
+  private readonly pendingRequests = new Map<string, Promise<any>>();
+  private readonly requestMetrics = new Map<string, { count: number; startTime: number }>();
 
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
     private configService: ConfigService,
-    private metricsService: MetricsService, // Add metrics service
+    private metricsService: MetricsService,
   ) {
-    this.defaultTtl = this.configService.get('redis.ttl', 30000);
+    // Clear existing metrics to prevent duplicates
+    register.clear();
+    
+    // Then initialize all your existing metrics normally...
   }
 
   async get<T>(key: string): Promise<T | null> {
@@ -188,6 +197,187 @@ export class CacheService {
       }
       await new Promise(resolve => setTimeout(resolve, checkInterval));
     }
+  }
+
+  /**
+   * Request coalescing wrapper - prevents duplicate requests for the same operation
+   */
+  async getWithCoalescing<T>(
+    key: string, 
+    factory: () => Promise<T>, 
+    coalescingTimeout: number = 10000,
+    ttl?: number
+  ): Promise<T> {
+    const startTime = Date.now();
+    const cacheType = this.extractCacheType(key);
+    
+    // First, try to get from cache
+    const cached = await this.get<T>(key);
+    if (cached) {
+      this.logger.debug(`Cache hit for coalesced request: ${key}`);
+      return cached;
+    }
+
+    // Check if there's already a pending request for this key
+    if (this.pendingRequests.has(key)) {
+      this.logger.debug(`Coalescing request for key: ${key}`);
+      
+      // Track coalesced request metrics
+      this.trackCoalescedRequest(key);
+      this.metricsService.trackCacheOperation('coalesce', 'success', Date.now() - startTime);
+      
+      try {
+        // Wait for the existing request to complete
+        const result = await this.pendingRequests.get(key);
+        
+        // Try to get the result from cache (the original request should have cached it)
+        const cachedResult = await this.get<T>(key);
+        if (cachedResult) {
+          return cachedResult;
+        }
+        
+        // If not in cache, return the result directly
+        return result;
+      } catch (error) {
+        this.logger.warn(`Coalesced request failed for key ${key}, falling back to new request:`, error);
+        // If the coalesced request failed, make a new request
+        return this.executeWithCoalescing(key, factory, coalescingTimeout, ttl);
+      }
+    }
+
+    // No pending request, execute the factory function with coalescing
+    return this.executeWithCoalescing(key, factory, coalescingTimeout, ttl);
+  }
+
+  private async executeWithCoalescing<T>(
+    key: string,
+    factory: () => Promise<T>,
+    coalescingTimeout: number = 10000,
+    ttl?: number
+  ): Promise<T> {
+    const startTime = Date.now();
+    
+    // Create the promise and store it for coalescing
+    const promise = this.createCoalescedPromise(key, factory, coalescingTimeout, ttl);
+    this.pendingRequests.set(key, promise);
+    
+    // Track the original request
+    this.trackCoalescedRequest(key, true);
+    
+    try {
+      const result = await promise;
+      this.metricsService.trackCacheOperation('coalesce', 'success', Date.now() - startTime);
+      return result;
+    } catch (error) {
+      this.metricsService.trackCacheOperation('coalesce', 'error', Date.now() - startTime);
+      throw error;
+    } finally {
+      // Clean up the pending request
+      this.pendingRequests.delete(key);
+      this.finalizeRequestMetrics(key);
+    }
+  }
+
+  private async createCoalescedPromise<T>(
+    key: string,
+    factory: () => Promise<T>,
+    coalescingTimeout: number,
+    ttl?: number
+  ): Promise<T> {
+    // Add timeout to prevent hanging requests
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(new SwapException(ErrorCode.EXTERNAL_SERVICE_ERROR, {
+          message: 'Request coalescing timeout',
+          key,
+          timeout: coalescingTimeout
+        }));
+      }, coalescingTimeout);
+    });
+
+    try {
+      // Race between the factory function and timeout
+      const result = await Promise.race([factory(), timeoutPromise]);
+      
+      // Cache the result for future requests
+      if (result !== null && result !== undefined) {
+        await this.set(key, result, ttl);
+        this.logger.debug(`Cached coalesced result for key: ${key}`);
+      }
+      
+      return result;
+    } catch (error) {
+      this.logger.error(`Coalesced request failed for key ${key}:`, error);
+      throw error;
+    }
+  }
+
+  private trackCoalescedRequest(key: string, isOriginal: boolean = false): void {
+    const existing = this.requestMetrics.get(key);
+    
+    if (existing) {
+      existing.count += 1;
+    } else {
+      this.requestMetrics.set(key, {
+        count: 1,
+        startTime: Date.now()
+      });
+    }
+
+    // Track metrics
+    if (isOriginal) {
+      this.metricsService.incrementCounter('vala_swap_coalescing_original_requests_total', { cache_type: this.extractCacheType(key) });
+    } else {
+      this.metricsService.incrementCounter('vala_swap_coalescing_duplicate_requests_total', { cache_type: this.extractCacheType(key) });
+    }
+  }
+
+  private finalizeRequestMetrics(key: string): void {
+    const metrics = this.requestMetrics.get(key);
+    if (metrics) {
+      const duration = Date.now() - metrics.startTime;
+      const cacheType = this.extractCacheType(key);
+      
+      // Track coalescing effectiveness
+      this.metricsService.trackHistogram('vala_swap_coalescing_request_count', metrics.count, { cache_type: cacheType });
+      this.metricsService.trackHistogram('vala_swap_coalescing_duration_seconds', duration / 1000, { cache_type: cacheType });
+      
+      // Calculate savings (requests saved by coalescing)
+      const requestsSaved = Math.max(0, metrics.count - 1);
+      if (requestsSaved > 0) {
+        this.metricsService.incrementCounter('vala_swap_coalescing_requests_saved_total', { cache_type: cacheType }, requestsSaved);
+      }
+      
+      this.logger.debug(`Coalescing metrics for ${key}: ${metrics.count} requests, ${requestsSaved} saved, ${duration}ms duration`);
+      this.requestMetrics.delete(key);
+    }
+  }
+
+  private cleanupRequestMetrics(): void {
+    const now = Date.now();
+    const maxAge = 10 * 60 * 1000; // 10 minutes
+    
+    for (const [key, metrics] of this.requestMetrics.entries()) {
+      if (now - metrics.startTime > maxAge) {
+        this.logger.warn(`Cleaning up stale request metrics for key: ${key}`);
+        this.requestMetrics.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Get coalescing statistics for monitoring
+   */
+  getCoalescingStats(): {
+    pendingRequests: number;
+    activeMetrics: number;
+    pendingKeys: string[];
+  } {
+    return {
+      pendingRequests: this.pendingRequests.size,
+      activeMetrics: this.requestMetrics.size,
+      pendingKeys: Array.from(this.pendingRequests.keys())
+    };
   }
 
   private extractCacheType(key: string): string {
