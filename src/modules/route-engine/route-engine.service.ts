@@ -16,11 +16,15 @@ import { CacheService } from '../cache/cache.service';
 import { ErrorCode } from '../../common/enums/error-codes.enum';
 import { SwapException } from '../../common/exceptions/swap.exception';
 import { MetricsService } from '../metrics/metrics.service';
+import { CircuitBreakerService } from '../../common/services/circuit-breaker.service';
+import { CircuitBreakerDexAdapter } from '../../common/services/circuit-breaker-dex-adapter';
 
 @Injectable()
 export class RouteEngineService implements RouteEngine {
   private readonly logger = new Logger(RouteEngineService.name);
   private readonly config: RouteEngineConfig;
+  private readonly jupiterCircuitBreaker: CircuitBreakerDexAdapter;
+  private readonly okxCircuitBreaker: CircuitBreakerDexAdapter;
 
   constructor(
     private configService: ConfigService,
@@ -28,6 +32,7 @@ export class RouteEngineService implements RouteEngine {
     private okxAdapter: OkxAdapter,
     private cacheService: CacheService,
     private metricsService: MetricsService,
+    private circuitBreakerService: CircuitBreakerService, // Add this
   ) {
     this.config = {
       performanceWeights: this.configService.get('dex.performanceWeights') || {
@@ -41,6 +46,19 @@ export class RouteEngineService implements RouteEngine {
       maxAlternatives: 3,
       enableCaching: true,
     };
+
+    // Wrap adapters with circuit breakers
+    this.jupiterCircuitBreaker = new CircuitBreakerDexAdapter(
+      this.jupiterAdapter,
+      this.circuitBreakerService,
+      'jupiter'
+    );
+
+    this.okxCircuitBreaker = new CircuitBreakerDexAdapter(
+      this.okxAdapter,
+      this.circuitBreakerService,
+      'okx'
+    );
   }
 
   async findBestRoute(request: RouteRequest): Promise<BestRouteResponse> {
@@ -187,14 +205,17 @@ export class RouteEngineService implements RouteEngine {
 
     const promises: Promise<ProviderQuote>[] = [];
 
-    // Jupiter quote
+    // Use circuit breaker wrapped adapters
     promises.push(
-      this.fetchQuoteWithTiming('Jupiter', () => this.jupiterAdapter.getQuote(quoteRequest))
+      this.fetchQuoteWithTiming('jupiter', () => 
+        this.jupiterCircuitBreaker.getQuote(quoteRequest)
+      )
     );
 
-    // // OKX quote
     promises.push(
-      this.fetchQuoteWithTiming('OKX', () => this.okxAdapter.getQuote(quoteRequest))
+      this.fetchQuoteWithTiming('okx', () => 
+        this.okxCircuitBreaker.getQuote(quoteRequest)
+      )
     );
 
     return promises;
@@ -225,13 +246,20 @@ export class RouteEngineService implements RouteEngine {
       
       // Track failed provider quote
       this.metricsService.trackProviderQuote(provider, 'error', responseTime);
-      this.metricsService.trackError(
-        error.errorCode || 'PROVIDER_ERROR',
-        provider,
-        'getQuote'
-      );
       
-      this.logger.warn(`Failed to get quote from ${provider}:`, error.message);
+      // Check if it's a circuit breaker error
+      if (error.errorCode === ErrorCode.CIRCUIT_BREAKER_OPEN) {
+        this.logger.warn(`Provider ${provider} circuit breaker is open, skipping`);
+        this.metricsService.trackError('CIRCUIT_BREAKER_OPEN', provider, 'getQuote');
+      } else {
+        this.metricsService.trackError(
+          error.errorCode || 'PROVIDER_ERROR',
+          provider,
+          'getQuote'
+        );
+        this.logger.warn(`Failed to get quote from ${provider}:`, error.message);
+      }
+      
       throw error;
     }
   }

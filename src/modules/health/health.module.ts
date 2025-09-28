@@ -6,6 +6,7 @@ import { HealthService } from './health.service';
 import { JupiterAdapter } from '../adapters/jupiter/jupiter.adapter';
 import { OkxAdapter } from '../adapters/okx/okx.adapter';
 import { CacheModule } from '../cache/cache.module';
+import { CircuitBreakerService } from '../../common/services/circuit-breaker.service';
 
 @Module({
   imports: [
@@ -14,7 +15,12 @@ import { CacheModule } from '../cache/cache.module';
     CacheModule,
   ],
   controllers: [HealthController],
-  providers: [HealthService, JupiterAdapter, OkxAdapter],
+  providers: [
+    HealthService,
+    CircuitBreakerService,
+    JupiterAdapter,
+    OkxAdapter,
+  ],
   exports: [HealthService],
 })
 export class HealthModule {}

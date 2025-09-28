@@ -29,6 +29,7 @@ import { JupiterAdapter } from './modules/adapters/jupiter/jupiter.adapter';
 import { OkxAdapter } from './modules/adapters/okx/okx.adapter';
 import { RouteEngineService } from './modules/route-engine/route-engine.service';
 import { MetricsModule } from './modules/metrics/metrics.module';
+import { CircuitBreakerService } from './common/services/circuit-breaker.service';
 
 @Module({
   imports: [
@@ -89,6 +90,7 @@ import { MetricsModule } from './modules/metrics/metrics.module';
     JupiterAdapter,
     OkxAdapter,
     RouteEngineService,
+    CircuitBreakerService, // Add this
   ],
 })
 export class AppModule {}

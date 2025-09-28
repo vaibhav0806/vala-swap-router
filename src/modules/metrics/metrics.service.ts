@@ -26,6 +26,11 @@ export class MetricsService {
   private readonly activeConnections: Gauge<string>;
   private readonly databaseConnections: Gauge<string>;
 
+  // Circuit breaker metrics
+  private circuitBreakerStateGauge: Gauge<string>;
+  private circuitBreakerStateChanges: Counter<string>;
+  private circuitBreakerOperations: Counter<string>;
+
   constructor() {
     // Initialize request metrics
     this.requestDuration = new Histogram({
@@ -113,6 +118,25 @@ export class MetricsService {
       labelNames: ['state'],
     });
 
+    // Circuit breaker metrics
+    this.circuitBreakerStateGauge = new Gauge({
+      name: 'vala_swap_circuit_breaker_state',
+      help: 'Current state of circuit breakers (0=closed, 1=half_open, 2=open)',
+      labelNames: ['service'],
+    });
+
+    this.circuitBreakerStateChanges = new Counter({
+      name: 'vala_swap_circuit_breaker_state_changes_total',
+      help: 'Total number of circuit breaker state changes',
+      labelNames: ['service', 'state'],
+    });
+
+    this.circuitBreakerOperations = new Counter({
+      name: 'vala_swap_circuit_breaker_operations_total',
+      help: 'Total number of operations through circuit breakers',
+      labelNames: ['service', 'result'],
+    });
+
     // Register all metrics
     register.registerMetric(this.requestDuration);
     register.registerMetric(this.requestTotal);
@@ -127,6 +151,9 @@ export class MetricsService {
     register.registerMetric(this.routeScores);
     register.registerMetric(this.activeConnections);
     register.registerMetric(this.databaseConnections);
+    register.registerMetric(this.circuitBreakerStateGauge);
+    register.registerMetric(this.circuitBreakerStateChanges);
+    register.registerMetric(this.circuitBreakerOperations);
 
     this.logger.log('Prometheus metrics initialized');
   }
@@ -212,6 +239,21 @@ export class MetricsService {
 
   updateDatabaseConnections(state: string, count: number): void {
     this.databaseConnections.labels(state).set(count);
+  }
+
+  /**
+   * Track circuit breaker state changes
+   */
+  trackCircuitBreakerState(serviceName: string, state: string): void {
+    this.circuitBreakerStateGauge.set({ service: serviceName }, state === 'closed' ? 0 : state === 'half_open' ? 1 : 2);
+    this.circuitBreakerStateChanges.inc({ service: serviceName, state });
+  }
+
+  /**
+   * Track circuit breaker operations
+   */
+  trackCircuitBreakerOperation(serviceName: string, result: 'success' | 'failure'): void {
+    this.circuitBreakerOperations.inc({ service: serviceName, result });
   }
 
   // Utility method to calculate cache hit ratio
