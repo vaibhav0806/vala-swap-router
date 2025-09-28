@@ -1,0 +1,44 @@
+config:
+  target: 'http://localhost:3000'
+  phases:
+    - duration: 10
+      arrivalRate: 10
+      name: "Burst test - 100 quotes in 10 seconds"
+  defaults:
+    headers:
+      content-type: 'application/json'
+
+scenarios:
+  - name: "Get quote for SOL->USDC"
+    weight: 70
+    flow:
+      - get:
+          url: "/api/v1/quote"
+          qs:
+            inputMint: "So11111111111111111111111111111111111111112"
+            outputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            amount: "1000000000"
+            slippageBps: "50"
+          expect:
+            - statusCode: 200
+          capture:
+            - json: "$.requestId"
+              as: "requestId"
+  
+  - name: "Health check"
+    weight: 20
+    flow:
+      - get:
+          url: "/api/v1/healthz"
+          expect:
+            - statusCode: 200
+  
+  - name: "Get tokens"
+    weight: 10
+    flow:
+      - get:
+          url: "/api/v1/tokens"
+          qs:
+            limit: "10"
+          expect:
+            - statusCode: 200

@@ -1,0 +1,279 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Decimal } from 'decimal.js';
+import {
+  RouteEngine,
+  RouteRequest,
+  BestRouteResponse,
+  RouteScore,
+  ProviderQuote,
+  RouteEngineConfig,
+} from '../../common/interfaces/route-engine.interface';
+import { QuoteResponse } from '../../common/interfaces/dex-adapter.interface';
+import { JupiterAdapter } from '../adapters/jupiter/jupiter.adapter';
+import { OkxAdapter } from '../adapters/okx/okx.adapter';
+import { CacheService } from '../cache/cache.service';
+import { ErrorCode } from '../../common/enums/error-codes.enum';
+import { SwapException } from '../../common/exceptions/swap.exception';
+
+@Injectable()
+export class RouteEngineService implements RouteEngine {
+  private readonly logger = new Logger(RouteEngineService.name);
+  private readonly config: RouteEngineConfig;
+
+  constructor(
+    private configService: ConfigService,
+    private jupiterAdapter: JupiterAdapter,
+    private okxAdapter: OkxAdapter,
+    private cacheService: CacheService,
+  ) {
+    this.config = {
+      performanceWeights: this.configService.get('dex.performanceWeights') || {
+        outputAmount: 0.4,
+        fees: 0.25,
+        gasEstimate: 0.15,
+        latency: 0.15,
+        reliability: 0.05,
+      },
+      routeExpirationMs: this.configService.get('dex.routeExpirationMs') || 30000,
+      maxAlternatives: 3,
+      enableCaching: true,
+    };
+  }
+
+  async findBestRoute(request: RouteRequest): Promise<BestRouteResponse> {
+    const startTime = Date.now();
+    const requestId = this.generateRequestId();
+    
+    this.logger.debug('Finding best route', { requestId, request });
+
+    try {
+      // Check cache first
+      const cacheKey = this.cacheService.generateRouteKey(
+        request.inputMint,
+        request.outputMint,
+        request.amount,
+      );
+
+      let cachedResult: BestRouteResponse | null = null;
+      if (this.config.enableCaching) {
+        cachedResult = await this.cacheService.get<BestRouteResponse>(cacheKey);
+        if (cachedResult && this.isRouteValid(cachedResult.bestRoute)) {
+          this.logger.debug('Returning cached route', { requestId });
+          return {
+            ...cachedResult,
+            requestId,
+            cacheHitRatio: 1.0,
+          };
+        }
+      }
+
+      // Fetch quotes from all providers in parallel
+      const quotePromises = await this.fetchQuotesFromProviders(request);
+      const quotes = await this.settleQuotePromises(quotePromises);
+
+      if (quotes.length === 0) {
+        throw new SwapException(ErrorCode.ROUTE_NOT_FOUND, {
+          requestId,
+          request,
+        });
+      }
+
+      // Calculate scores for each quote
+      const scoredQuotes = quotes.map(quote => ({
+        ...quote,
+        score: this.calculateRouteScore(quote, quote.responseTime),
+      }));
+
+      // Apply policy preferences
+      const rankedQuotes = this.applyRoutingPolicy(scoredQuotes, request);
+
+      // Select best route and alternatives
+      const bestRoute = rankedQuotes[0];
+      const alternatives = rankedQuotes.slice(1, this.config.maxAlternatives + 1);
+
+      const result: BestRouteResponse = {
+        bestRoute,
+        alternatives,
+        requestId,
+        totalResponseTime: Date.now() - startTime,
+        cacheHitRatio: cachedResult ? 0.5 : 0.0,
+      };
+
+      // Cache the result
+      if (this.config.enableCaching) {
+        await this.cacheService.set(cacheKey, result, this.config.routeExpirationMs);
+      }
+
+      this.logger.debug('Best route found', {
+        requestId,
+        provider: bestRoute.provider,
+        outputAmount: bestRoute.outAmount,
+        score: bestRoute.score.totalScore,
+        totalTime: result.totalResponseTime,
+      });
+
+      return result;
+    } catch (error) {
+      this.logger.error('Failed to find best route', { requestId, error });
+      throw error;
+    }
+  }
+
+  calculateRouteScore(quote: QuoteResponse, responseTime: number): RouteScore {
+    const weights = this.config.performanceWeights;
+    
+    // Normalize values to 0-1 scale for scoring
+    const outputAmount = this.normalizeOutputAmount(quote.outAmount);
+    const fees = this.normalizeFees(quote.platformFee?.amount || '0', quote.inAmount);
+    const gasEstimate = this.normalizeGasEstimate(100000); // Default gas estimate
+    const latency = this.normalizeLatency(responseTime);
+    const reliability = this.getProviderReliability(quote);
+
+    // Calculate weighted score (higher is better)
+    const totalScore = 
+      (outputAmount * weights.outputAmount) +
+      ((1 - fees) * weights.fees) + // Invert fees (lower fees = higher score)
+      ((1 - gasEstimate) * weights.gasEstimate) + // Invert gas (lower gas = higher score)
+      ((1 - latency) * weights.latency) + // Invert latency (lower latency = higher score)
+      (reliability * weights.reliability);
+
+    return {
+      outputAmount,
+      fees,
+      gasEstimate,
+      latency,
+      reliability,
+      totalScore,
+    };
+  }
+
+  getConfig(): RouteEngineConfig {
+    return this.config;
+  }
+
+  private async fetchQuotesFromProviders(request: RouteRequest): Promise<Promise<ProviderQuote>[]> {
+    const quoteRequest = {
+      inputMint: request.inputMint,
+      outputMint: request.outputMint,
+      amount: request.amount,
+      slippageBps: request.slippageBps,
+      userPublicKey: request.userPublicKey,
+    };
+
+    const promises: Promise<ProviderQuote>[] = [];
+
+    // Jupiter quote
+    promises.push(
+      this.fetchQuoteWithTiming('Jupiter', () => this.jupiterAdapter.getQuote(quoteRequest))
+    );
+
+    // // OKX quote
+    promises.push(
+      this.fetchQuoteWithTiming('OKX', () => this.okxAdapter.getQuote(quoteRequest))
+    );
+
+    return promises;
+  }
+
+  private async fetchQuoteWithTiming(
+    provider: string,
+    quoteFunction: () => Promise<QuoteResponse>
+  ): Promise<ProviderQuote> {
+    const startTime = Date.now();
+    
+    try {
+      const quote = await quoteFunction();
+      const responseTime = Date.now() - startTime;
+      
+      return {
+        ...quote,
+        provider,
+        responseTime,
+        score: { outputAmount: 0, fees: 0, gasEstimate: 0, latency: 0, reliability: 0, totalScore: 0 },
+        isCached: false,
+      };
+    } catch (error) {
+      this.logger.warn(`Failed to get quote from ${provider}:`, error.message);
+      throw error;
+    }
+  }
+
+  private async settleQuotePromises(promises: Promise<ProviderQuote>[]): Promise<ProviderQuote[]> {
+    const results = await Promise.allSettled(promises);
+    
+    return results
+      .filter((result): result is PromiseFulfilledResult<ProviderQuote> => 
+        result.status === 'fulfilled'
+      )
+      .map(result => result.value);
+  }
+
+  private applyRoutingPolicy(quotes: ProviderQuote[], request: RouteRequest): ProviderQuote[] {
+    if (request.favorLowLatency) {
+      // Prioritize latency over output amount when favorLowLatency is true
+      return quotes.sort((a, b) => {
+        const aLatencyScore = (1 - a.score.latency) * 0.6 + a.score.outputAmount * 0.4;
+        const bLatencyScore = (1 - b.score.latency) * 0.6 + b.score.outputAmount * 0.4;
+        return bLatencyScore - aLatencyScore;
+      });
+    }
+
+    // Default: sort by total score
+    return quotes.sort((a, b) => b.score.totalScore - a.score.totalScore);
+  }
+
+  private normalizeOutputAmount(outAmount: string): number {
+    // Normalize based on expected range - this would be more sophisticated in production
+    // For now, we'll use a simple approach
+    const amount = new Decimal(outAmount);
+    const maxExpected = new Decimal('1000000000000'); // 1M with 6 decimals
+    return Math.min(amount.div(maxExpected).toNumber(), 1);
+  }
+
+  private normalizeFees(feeAmount: string, inputAmount: string): number {
+    if (feeAmount === '0' || inputAmount === '0') return 0;
+    
+    const fee = new Decimal(feeAmount);
+    const input = new Decimal(inputAmount);
+    const feeRatio = fee.div(input).toNumber();
+    
+    // Normalize to 0-1 scale, where 0.01 (1%) is considered high
+    return Math.min(feeRatio / 0.01, 1);
+  }
+
+  private normalizeGasEstimate(gasEstimate: number): number {
+    // Normalize gas estimate (example: 200k gas is considered high)
+    const maxGas = 200000;
+    return Math.min(gasEstimate / maxGas, 1);
+  }
+
+  private normalizeLatency(responseTime: number): number {
+    // Normalize latency (example: 3000ms is considered high)
+    const maxLatency = 3000;
+    return Math.min(responseTime / maxLatency, 1);
+  }
+
+  private getProviderReliability(quote: QuoteResponse): number {
+    // Simple reliability scoring based on historical data
+    // In production, this would be based on actual success rates
+    const providerReliability = {
+      'Jupiter': 0.95,
+      'OKX': 0.90,
+    };
+
+    return providerReliability['Jupiter'] || 0.85; // Default reliability
+  }
+
+  private isRouteValid(route: ProviderQuote): boolean {
+    if (!route.timeTaken) return false;
+    
+    const now = Date.now();
+    const routeAge = now - route.timeTaken;
+    return routeAge < this.config.routeExpirationMs;
+  }
+
+  private generateRequestId(): string {
+    return `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  }
+}

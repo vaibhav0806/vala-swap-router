@@ -1,0 +1,96 @@
+### Variables
+@baseUrl = http://localhost:3000/api/v1
+@solMint = So11111111111111111111111111111111111111112
+@usdcMint = EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+@userPubkey = 8WzZd5zKYQK6qZvJVqxFjfK8nkGLCwhfYHSfQ1GqQxcZ
+
+### Health Check - Simple
+GET {{baseUrl}}/healthz
+
+### Health Check - Detailed
+GET {{baseUrl}}/healthz/detailed
+
+### Health Check - Liveness
+GET {{baseUrl}}/healthz/live
+
+### Health Check - Readiness
+GET {{baseUrl}}/healthz/ready
+
+### Get All Tokens
+GET {{baseUrl}}/tokens?limit=20&offset=0
+
+### Search Tokens
+GET {{baseUrl}}/tokens/search/SOL
+
+### Get Token by Address
+GET {{baseUrl}}/tokens/{{solMint}}
+
+### Get Popular Tokens
+GET {{baseUrl}}/tokens/popular
+
+### Get Quote - SOL to USDC (Basic)
+GET {{baseUrl}}/quote?inputMint={{solMint}}&outputMint={{usdcMint}}&amount=1000000000&slippageBps=50
+
+### Get Quote - SOL to USDC (With User)
+GET {{baseUrl}}/quote?inputMint={{solMint}}&outputMint={{usdcMint}}&amount=1000000000&slippageBps=50&userPublicKey={{userPubkey}}
+
+### Get Quote - SOL to USDC (Favor Low Latency)
+GET {{baseUrl}}/quote?inputMint={{solMint}}&outputMint={{usdcMint}}&amount=1000000000&slippageBps=50&favorLowLatency=true&maxRoutes=5
+
+### Get Quote - Large Amount (Testing Slippage)
+GET {{baseUrl}}/quote?inputMint={{solMint}}&outputMint={{usdcMint}}&amount=10000000000&slippageBps=100
+
+### Simulate Quote
+GET {{baseUrl}}/quote/simulate?inputMint={{solMint}}&outputMint={{usdcMint}}&amount=1000000000&slippageBps=50
+
+### Execute Swap
+POST {{baseUrl}}/swap/execute
+Content-Type: application/json
+
+{
+  "quoteId": "{{quoteId}}",
+  "userPublicKey": "{{userPubkey}}",
+  "wrapAndUnwrapSol": true,
+  "useSharedAccounts": true,
+  "computeUnitPriceMicroLamports": 1000
+}
+
+### Simulate Swap
+POST {{baseUrl}}/swap/simulate
+Content-Type: application/json
+
+{
+  "quoteId": "{{quoteId}}",
+  "userPublicKey": "{{userPubkey}}"
+}
+
+### Get Swap Status
+GET {{baseUrl}}/swap/{{transactionId}}
+
+### Get Swap Statistics
+GET {{baseUrl}}/swap
+
+### Cancel Swap
+POST {{baseUrl}}/swap/{{transactionId}}/cancel
+
+### Error Test - Invalid Token
+GET {{baseUrl}}/quote?inputMint=invalid&outputMint={{usdcMint}}&amount=1000000000
+
+### Error Test - Same Input/Output
+GET {{baseUrl}}/quote?inputMint={{solMint}}&outputMint={{solMint}}&amount=1000000000
+
+### Error Test - Invalid Amount
+GET {{baseUrl}}/quote?inputMint={{solMint}}&outputMint={{usdcMint}}&amount=0
+
+### Error Test - Too High Slippage
+GET {{baseUrl}}/quote?inputMint={{solMint}}&outputMint={{usdcMint}}&amount=1000000000&slippageBps=15000
+
+### Rate Limit Test (Run multiple times quickly)
+GET {{baseUrl}}/healthz
+
+### Load Test Simulation (BONK example)
+# First get BONK mint address if available
+GET {{baseUrl}}/tokens/search/BONK
+
+### Example BONK to SOL swap (if BONK is available)
+# GET {{baseUrl}}/quote?inputMint=DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263&outputMint={{solMint}}&amount=1000000000000&favorLowLatency=true
