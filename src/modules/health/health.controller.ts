@@ -6,7 +6,7 @@ import { ErrorCode } from 'src/common/enums/error-codes.enum';
 import { SwapException } from 'src/common/exceptions/swap.exception';
 
 @ApiTags('health')
-@Controller('health')
+@Controller('healthz')
 export class HealthController {
   constructor(
     private readonly healthService: HealthService,

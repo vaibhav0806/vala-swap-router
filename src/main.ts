@@ -74,7 +74,7 @@ async function bootstrap() {
 
   // Global prefix - BUT exclude /metrics from the prefix
   app.setGlobalPrefix('api', {
-    exclude: ['metrics', 'health'], // Exclude metrics and health from api prefix
+    exclude: ['metrics', 'healthz'], // Exclude metrics and healthz from api prefix
   });
 
   // Swagger documentation

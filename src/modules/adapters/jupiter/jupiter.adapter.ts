@@ -264,9 +264,21 @@ export class JupiterAdapter implements DexAdapter {
 
   async isHealthy(): Promise<boolean> {
     try {
-      // Simple health check by making a minimal request
-      const response = await this.httpClient.get('/tokens', { timeout: 3000 });
-      const isHealthy = response.status === 200;
+      // Use Jupiter's lite-api tokens endpoint for health check
+      this.logger.debug('Jupiter health check starting...');
+      const response = await axios.get('https://lite-api.jup.ag/tokens/v2/search', { 
+        timeout: 5000,
+        params: {
+          query: 'SOL'
+        },
+        headers: {
+          'Accept': 'application/json'
+        }
+      });
+      const isHealthy = response.status === 200 && response.data && Array.isArray(response.data);
+      console.log("Health check response:", response.data, isHealthy);
+      
+      this.logger.debug(`Jupiter health check result: ${isHealthy} (status: ${response.status}, hasData: ${!!response.data})`);
       
       // Update availability metric
       this.metricsService.updateProviderAvailability('jupiter', isHealthy);
@@ -275,6 +287,7 @@ export class JupiterAdapter implements DexAdapter {
     } catch (error) {
       this.metricsService.updateProviderAvailability('jupiter', false);
       this.logger.warn('Jupiter health check failed:', error.message);
+      this.logger.debug('Jupiter health check error details:', error);
       return false;
     }
   }
