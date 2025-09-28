@@ -225,12 +225,22 @@ export class TokensService {
           address: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
           symbol: 'USDT',
           name: 'Tether USD',
-          decimals: 6,
+          decimals: 5,
           chainId: 1,
           logoURI: 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB/logo.svg',
           tags: JSON.stringify(['stablecoin']),
           isActive: true,
         },
+        {
+          address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
+          symbol: 'BONK',
+          name: 'Bonk',
+          decimals: 6,
+          chainId: 1,
+          logoURI: 'https://arweave.net/hQiPZOsRZXGXBJd_82PhVdlM_hACsT_q6wqwf5cSY7I',
+          tags: JSON.stringify(['memecoin']),
+          isActive: true,
+        }
       ];
 
       for (const tokenData of defaultTokens) {
